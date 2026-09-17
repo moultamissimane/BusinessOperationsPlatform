@@ -1,0 +1,6 @@
+{
+  "name": "WorkFlow ERP",
+  "description": "Enterprise business operations platform featuring employee directory, project tracking, leave approvals, expense management, and audit logging.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
