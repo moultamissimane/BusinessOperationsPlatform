@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
   Employee,
   Project,
@@ -7,414 +7,330 @@ import {
   Expense,
   AuditLogEntry,
   CurrentUser,
+  LeaveBalance,
   TaskStatus,
-  LeaveStatus,
   ExpenseStatus,
   DepartmentType,
   RoleType,
 } from '../types';
-import {
-  INITIAL_EMPLOYEES,
-  INITIAL_PROJECTS,
-  INITIAL_TASKS,
-  INITIAL_LEAVES,
-  INITIAL_EXPENSES,
-  INITIAL_AUDIT_LOGS,
-  DEMO_USERS,
-} from '../mockData';
+import { api, ApiError } from '../api/client';
+import { useAuth } from './AuthContext';
+
+type Currency = 'MAD' | 'USD' | 'EUR';
+type Collection = 'employees' | 'projects' | 'tasks' | 'leaves' | 'expenses' | 'audit' | 'balance';
+
+export interface Toast {
+  id: number;
+  type: 'success' | 'error';
+  message: string;
+}
 
 interface ErpContextType {
   currentUser: CurrentUser;
-  setCurrentUser: (user: CurrentUser) => void;
-  availableUsers: CurrentUser[];
   employees: Employee[];
   projects: Project[];
   tasks: Task[];
   leaves: LeaveRequest[];
   expenses: Expense[];
   auditLogs: AuditLogEntry[];
-  currency: 'MAD' | 'USD' | 'EUR';
-  setCurrency: (c: 'MAD' | 'USD' | 'EUR') => void;
+  auditTotal: number;
+  leaveBalance: LeaveBalance | null;
+  currency: Currency;
+  setCurrency: (c: Currency) => void;
+  toasts: Toast[];
+  dismissToast: (id: number) => void;
 
-  // Actions
-  addEmployee: (employee: Omit<Employee, 'id' | 'code'>) => void;
-  updateEmployeeRole: (id: string, newRole: RoleType, newDepartment: DepartmentType) => void;
-  addProject: (project: Omit<Project, 'id' | 'code' | 'spent' | 'progress'>) => void;
-  addTask: (task: Omit<Task, 'id' | 'code' | 'createdAt'>) => void;
-  updateTaskStatus: (taskId: string, newStatus: TaskStatus) => void;
-
-  // Leave Actions
-  requestLeave: (request: Omit<LeaveRequest, 'id' | 'code' | 'status' | 'submittedAt'>) => void;
-  reviewLeave: (leaveId: string, status: 'Approved' | 'Rejected', comment?: string) => void;
-
-  // Expense Actions
-  submitExpense: (expense: Omit<Expense, 'id' | 'code' | 'status' | 'submittedAt'>) => void;
-  reviewExpense: (expenseId: string, status: ExpenseStatus, notes?: string) => void;
-
-  // Helper/Reset
-  resetDemoData: () => void;
-  recordAudit: (
-    action: AuditLogEntry['action'],
-    entity: string,
-    entityType: AuditLogEntry['entityType'],
-    oldValue: string,
-    newValue: string,
-    notes?: string
-  ) => void;
+  // Every action resolves to true on success and false on failure (the failure is already shown as a toast).
+  addEmployee: (employee: Omit<Employee, 'id' | 'code'> & { initialPassword: string }) => Promise<boolean>;
+  updateEmployeeRole: (id: string, newRole: RoleType, newDepartment: DepartmentType) => Promise<boolean>;
+  addProject: (project: Omit<Project, 'id' | 'code' | 'spent' | 'progress'>) => Promise<boolean>;
+  addTask: (task: Omit<Task, 'id' | 'code' | 'createdAt'>) => Promise<boolean>;
+  updateTaskStatus: (taskId: string, newStatus: TaskStatus) => Promise<boolean>;
+  requestLeave: (request: Omit<LeaveRequest, 'id' | 'code' | 'status' | 'submittedAt' | 'daysCount'>) => Promise<boolean>;
+  reviewLeave: (leaveId: string, status: 'Approved' | 'Rejected', comment?: string) => Promise<boolean>;
+  submitExpense: (expense: Omit<Expense, 'id' | 'code' | 'status' | 'submittedAt' | 'receiptUrl' | 'receiptFileName'>, receipt?: File | null) => Promise<boolean>;
+  reviewExpense: (expenseId: string, status: ExpenseStatus, notes?: string) => Promise<boolean>;
+  attachReceipt: (expenseId: string, file: File) => Promise<boolean>;
+  /** After "Changes Requested": sends the claim back to the manager's queue. */
+  resubmitExpense: (expenseId: string) => Promise<boolean>;
+  reload: () => Promise<void>;
 }
 
 const ErpContext = createContext<ErpContextType | undefined>(undefined);
 
-const formatTimestamp = (date: Date = new Date()): string => {
-  const day = date.getDate().toString().padStart(2, '0');
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const month = monthNames[date.getMonth()];
-  const year = date.getFullYear();
-  const hours = date.getHours().toString().padStart(2, '0');
-  const minutes = date.getMinutes().toString().padStart(2, '0');
-  return `${day} ${month} ${year} ${hours}:${minutes}`;
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** "2026-09-15T14:32:00Z" -> "15 Sep 2026 14:32" in the viewer's local time. */
+const formatTimestamp = (iso: string): string => {
+  const d = new Date(iso);
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${pad(d.getDate())} ${MONTHS[d.getMonth()]} ${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+const orUndefined = <T,>(v: T | null | undefined): T | undefined => v ?? undefined;
+
+// The API sends null for missing values and ISO timestamps; the views expect undefined and display strings.
+const mapEmployee = (e: any): Employee => ({ ...e, managerId: orUndefined(e.managerId) });
+const mapTask = (t: any): Task => ({ ...t, createdAt: formatTimestamp(t.createdAt) });
+const mapLeave = (l: any): LeaveRequest => ({
+  ...l,
+  submittedAt: formatTimestamp(l.submittedAt),
+  reviewedBy: orUndefined(l.reviewedBy),
+  reviewedAt: l.reviewedAt ? formatTimestamp(l.reviewedAt) : undefined,
+  reviewComment: orUndefined(l.reviewComment),
+  exceptionalSubtype: orUndefined(l.exceptionalSubtype),
+});
+const mapExpense = (e: any): Expense => ({
+  ...e,
+  submittedAt: formatTimestamp(e.submittedAt),
+  receiptUrl: orUndefined(e.receiptUrl),
+  receiptFileName: orUndefined(e.receiptFileName),
+  reviewedBy: orUndefined(e.reviewedBy),
+  reviewedAt: e.reviewedAt ? formatTimestamp(e.reviewedAt) : undefined,
+  managerNotes: orUndefined(e.managerNotes),
+});
+const mapAudit = (a: any): AuditLogEntry => ({ ...a, timestamp: formatTimestamp(a.timestamp), notes: orUndefined(a.notes) });
+
+/** Some users lack permission for a collection (403). That is normal, not an error: they simply see none of it. */
+const tolerant = async <T,>(request: Promise<T>, fallback: T): Promise<T> => {
+  try {
+    return await request;
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 403) return fallback;
+    throw e;
+  }
 };
 
 export const ErpProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [currentUser, setCurrentUserState] = useState<CurrentUser>(() => {
-    const saved = localStorage.getItem('workflow_current_user');
-    if (saved) {
-      try { return JSON.parse(saved); } catch { /* ignore */ }
-    }
-    return DEMO_USERS[0]; // Imane Benkirane by default
-  });
+  const { user: currentUser, logout } = useAuth();
 
-  const [employees, setEmployees] = useState<Employee[]>(() => {
-    const saved = localStorage.getItem('workflow_employees');
-    if (saved) {
-      try { return JSON.parse(saved); } catch { /* ignore */ }
-    }
-    return INITIAL_EMPLOYEES;
-  });
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [leaves, setLeaves] = useState<LeaveRequest[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [leaveBalance, setLeaveBalance] = useState<LeaveBalance | null>(null);
+  const [currency, setCurrency] = useState<Currency>('MAD');
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const nextToastId = useRef(1);
 
-  const [projects, setProjects] = useState<Project[]>(() => {
-    const saved = localStorage.getItem('workflow_projects');
-    if (saved) {
-      try { return JSON.parse(saved); } catch { /* ignore */ }
-    }
-    return INITIAL_PROJECTS;
-  });
+  const notify = useCallback((type: Toast['type'], message: string) => {
+    const id = nextToastId.current++;
+    setToasts((prev) => [...prev, { id, type, message }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), type === 'error' ? 7000 : 3500);
+  }, []);
+  const dismissToast = useCallback((id: number) => setToasts((prev) => prev.filter((t) => t.id !== id)), []);
 
-  const [tasks, setTasks] = useState<Task[]>(() => {
-    const saved = localStorage.getItem('workflow_tasks');
-    if (saved) {
-      try { return JSON.parse(saved); } catch { /* ignore */ }
-    }
-    return INITIAL_TASKS;
-  });
-
-  const [leaves, setLeaves] = useState<LeaveRequest[]>(() => {
-    const saved = localStorage.getItem('workflow_leaves');
-    if (saved) {
-      try { return JSON.parse(saved); } catch { /* ignore */ }
-    }
-    return INITIAL_LEAVES;
-  });
-
-  const [expenses, setExpenses] = useState<Expense[]>(() => {
-    const saved = localStorage.getItem('workflow_expenses');
-    if (saved) {
-      try { return JSON.parse(saved); } catch { /* ignore */ }
-    }
-    return INITIAL_EXPENSES;
-  });
-
-  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>(() => {
-    const saved = localStorage.getItem('workflow_audit_logs');
-    if (saved) {
-      try { return JSON.parse(saved); } catch { /* ignore */ }
-    }
-    return INITIAL_AUDIT_LOGS;
-  });
-
-  const [currency, setCurrency] = useState<'MAD' | 'USD' | 'EUR'>('MAD');
-
-  // Sync to localStorage
-  useEffect(() => {
-    localStorage.setItem('workflow_current_user', JSON.stringify(currentUser));
-  }, [currentUser]);
-
-  useEffect(() => {
-    localStorage.setItem('workflow_employees', JSON.stringify(employees));
-  }, [employees]);
-
-  useEffect(() => {
-    localStorage.setItem('workflow_projects', JSON.stringify(projects));
-  }, [projects]);
-
-  useEffect(() => {
-    localStorage.setItem('workflow_tasks', JSON.stringify(tasks));
-  }, [tasks]);
-
-  useEffect(() => {
-    localStorage.setItem('workflow_leaves', JSON.stringify(leaves));
-  }, [leaves]);
-
-  useEffect(() => {
-    localStorage.setItem('workflow_expenses', JSON.stringify(expenses));
-  }, [expenses]);
-
-  useEffect(() => {
-    localStorage.setItem('workflow_audit_logs', JSON.stringify(auditLogs));
-  }, [auditLogs]);
-
-  const setCurrentUser = (user: CurrentUser) => {
-    setCurrentUserState(user);
+  const fetchers: Record<Collection, () => Promise<void>> = {
+    employees: async () => setEmployees((await tolerant(api.get<any[]>('/employees'), [])).map(mapEmployee)),
+    projects: async () => setProjects(await tolerant(api.get<Project[]>('/projects'), [])),
+    tasks: async () => setTasks((await tolerant(api.get<any[]>('/tasks'), [])).map(mapTask)),
+    leaves: async () => setLeaves((await api.get<any[]>('/leaves')).map(mapLeave)),
+    expenses: async () => setExpenses((await api.get<any[]>('/expenses')).map(mapExpense)),
+    audit: async () => {
+      const page = await tolerant(api.get<{ items: any[]; total: number }>('/audit-logs?pageSize=100'), { items: [], total: 0 });
+      setAuditLogs(page.items.map(mapAudit));
+      setAuditTotal(page.total);
+    },
+    balance: async () => setLeaveBalance(await api.get<LeaveBalance>('/leaves/balance')),
   };
 
-  const recordAudit = (
-    action: AuditLogEntry['action'],
-    entity: string,
-    entityType: AuditLogEntry['entityType'],
-    oldValue: string,
-    newValue: string,
-    notes?: string
-  ) => {
-    const newEntry: AuditLogEntry = {
-      id: `aud-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      userId: currentUser.id,
-      userName: currentUser.name,
-      userRole: currentUser.role,
-      action,
-      entity,
-      entityType,
-      oldValue,
-      newValue,
-      timestamp: formatTimestamp(),
-      ipAddress: currentUser.ip,
-      notes,
+  const reload = useCallback(async () => {
+    await Promise.all(Object.values(fetchers).map((f) => f()));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const refresh = async (...keys: Collection[]) => {
+    await Promise.all(keys.map((k) => fetchers[k]()));
+  };
+
+  // Load everything once per signed-in user; drop everything on sign-out so the next user never sees stale data.
+  useEffect(() => {
+    if (!currentUser) {
+      setLoaded(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadError(null);
+    reload()
+      .then(() => !cancelled && setLoaded(true))
+      .catch((e) => !cancelled && setLoadError(e instanceof Error ? e.message : 'Could not load data.'));
+    return () => {
+      cancelled = true;
     };
-    setAuditLogs((prev) => [newEntry, ...prev]);
+  }, [currentUser?.id, reload]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Runs an API call, then refreshes what it touched. Failures become toasts instead of unhandled rejections. */
+  const act = async (fn: () => Promise<unknown>, reloadKeys: Collection[], success?: string): Promise<boolean> => {
+    try {
+      await fn();
+    } catch (e) {
+      notify('error', e instanceof Error ? e.message : 'Something went wrong.');
+      return false;
+    }
+    try {
+      await refresh('audit', ...reloadKeys);
+    } catch {
+      /* the action succeeded; a failed refresh will be corrected by the next reload */
+    }
+    if (success) notify('success', success);
+    return true;
   };
 
-  const addEmployee = (empData: Omit<Employee, 'id' | 'code'>) => {
-    const nextCode = `EMP-${(employees.length + 1).toString().padStart(3, '0')}`;
-    const newEmp: Employee = {
-      ...empData,
-      id: `emp-${Date.now()}`,
-      code: nextCode,
-    };
-    setEmployees((prev) => [...prev, newEmp]);
-    recordAudit(
-      'Created',
-      `Employee #${newEmp.code.replace('EMP-', '')}`,
-      'Employee',
-      'N/A',
-      `${newEmp.name} (${newEmp.role} - ${newEmp.department})`,
-      `Added by ${currentUser.name}`
+  if (!currentUser) return null; // AuthGate never renders us signed out; this is just for type narrowing.
+
+  if (loadError) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center gap-3 bg-slate-50 text-slate-700 text-sm">
+        <p className="font-semibold">Could not reach the WorkFlow API</p>
+        <p className="text-xs text-slate-500 max-w-md text-center">{loadError}</p>
+        <div className="flex gap-2">
+          <button onClick={() => window.location.reload()} className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-semibold">
+            Retry
+          </button>
+          <button onClick={logout} className="px-3 py-1.5 border border-slate-300 rounded-lg text-xs font-semibold">
+            Sign out
+          </button>
+        </div>
+      </div>
     );
+  }
+
+  if (!loaded) {
+    return <div className="h-screen flex items-center justify-center bg-slate-50 text-sm text-slate-500">Loading your workspace…</div>;
+  }
+
+  const addEmployee: ErpContextType['addEmployee'] = ({ initialPassword, ...e }) =>
+    act(
+      () =>
+        api.post('/employees', {
+          name: e.name,
+          email: e.email,
+          phone: e.phone,
+          avatar: e.avatar,
+          department: e.department,
+          role: e.role,
+          title: e.title,
+          joinDate: e.joinDate,
+          location: e.location,
+          managerId: e.managerId ?? null,
+          permissions: null, // let the role's defaults apply
+          initialPassword,
+        }),
+      ['employees'],
+      `${e.name} was added.`
+    );
+
+  const updateEmployeeRole: ErpContextType['updateEmployeeRole'] = (id, role, department) =>
+    act(() => api.put(`/employees/${id}`, { role, department }), ['employees'], 'Employee updated.');
+
+  const addProject: ErpContextType['addProject'] = (p) =>
+    act(
+      () =>
+        api.post('/projects', {
+          name: p.name,
+          description: p.description,
+          department: p.department,
+          leadId: p.leadId,
+          budget: p.budget,
+          startDate: p.startDate,
+          deadline: p.deadline,
+          status: p.status,
+          teamIds: p.teamIds,
+        }),
+      ['projects'],
+      'Project created.'
+    );
+
+  const addTask: ErpContextType['addTask'] = (t) =>
+    act(
+      async () => {
+        const created = await api.post<{ id: string }>('/tasks', {
+          projectId: t.projectId,
+          title: t.title,
+          description: t.description,
+          assignedToId: t.assignedToId,
+          priority: t.priority,
+          deadline: t.deadline,
+        });
+        // New tasks always start in Backlog on the server; move it if the form asked for another column.
+        if (t.status !== 'Backlog') await api.patch(`/tasks/${created.id}/status`, { status: t.status });
+      },
+      ['tasks'],
+      'Task created.'
+    );
+
+  const updateTaskStatus: ErpContextType['updateTaskStatus'] = async (taskId, status) => {
+    const previous = tasks;
+    setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, status } : t))); // optimistic: the board moves instantly
+    const ok = await act(() => api.patch(`/tasks/${taskId}/status`, { status }), ['tasks']);
+    if (!ok) setTasks(previous);
+    return ok;
   };
 
-  const updateEmployeeRole = (id: string, newRole: RoleType, newDepartment: DepartmentType) => {
-    const target = employees.find((e) => e.id === id);
-    if (!target) return;
-    const oldVal = `${target.role} (${target.department})`;
-    const newVal = `${newRole} (${newDepartment})`;
-    setEmployees((prev) =>
-      prev.map((e) => (e.id === id ? { ...e, role: newRole, department: newDepartment } : e))
-    );
-    recordAudit(
-      'Updated',
-      `Employee #${target.code.replace('EMP-', '')}`,
-      'Employee',
-      oldVal,
-      newVal,
-      `Role/Dept reassignment by ${currentUser.name}`
-    );
-  };
-
-  const addProject = (projectData: Omit<Project, 'id' | 'code' | 'spent' | 'progress'>) => {
-    const nextCode = `PRJ-${(projects.length + 101).toString()}`;
-    const newProj: Project = {
-      ...projectData,
-      id: `prj-${Date.now()}`,
-      code: nextCode,
-      spent: 0,
-      progress: 0,
-    };
-    setProjects((prev) => [...prev, newProj]);
-    recordAudit(
-      'Created',
-      `Project #${newProj.code.replace('PRJ-', '')}`,
-      'Project',
-      'N/A',
-      `${newProj.name} (Budget: ${newProj.budget} MAD)`,
-      `Project initiated by ${currentUser.name}`
-    );
-  };
-
-  const addTask = (taskData: Omit<Task, 'id' | 'code' | 'createdAt'>) => {
-    const nextCode = `TSK-${(tasks.length + 201).toString()}`;
-    const newTask: Task = {
-      ...taskData,
-      id: `tsk-${Date.now()}`,
-      code: nextCode,
-      createdAt: formatTimestamp(),
-    };
-    setTasks((prev) => [newTask, ...prev]);
-    recordAudit(
-      'Created',
-      `Task #${newTask.code.replace('TSK-', '')}`,
-      'Task',
-      'N/A',
-      `Title: "${newTask.title}" (Priority: ${newTask.priority})`,
-      `Created by ${currentUser.name}`
-    );
-  };
-
-  const updateTaskStatus = (taskId: string, newStatus: TaskStatus) => {
-    const task = tasks.find((t) => t.id === taskId);
-    if (!task || task.status === newStatus) return;
-    const oldStatus = task.status;
-    setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t)));
-    recordAudit(
-      'Status Changed',
-      `Task #${task.code.replace('TSK-', '')}`,
-      'Task',
-      `Status: ${oldStatus}`,
-      `Status: ${newStatus}`,
-      `Updated by ${currentUser.name}`
-    );
-  };
-
-  const requestLeave = (reqData: Omit<LeaveRequest, 'id' | 'code' | 'status' | 'submittedAt'>) => {
-    const nextCode = `LEV-${(leaves.length + 90).toString().padStart(3, '0')}`;
-    const newLeave: LeaveRequest = {
-      ...reqData,
-      id: `lev-${Date.now()}`,
-      code: nextCode,
-      status: 'Pending',
-      submittedAt: formatTimestamp(),
-    };
-    setLeaves((prev) => [newLeave, ...prev]);
-    recordAudit(
-      'Created',
-      `Leave #${newLeave.code.replace('LEV-', '')}`,
-      'Leave',
-      'N/A',
-      `${newLeave.leaveType} (${newLeave.daysCount} days: ${newLeave.startDate} to ${newLeave.endDate})`,
-      `Submitted by ${currentUser.name}`
-    );
-  };
-
-  const reviewLeave = (leaveId: string, status: 'Approved' | 'Rejected', comment?: string) => {
-    const target = leaves.find((l) => l.id === leaveId);
-    if (!target) return;
-    const oldStatus = target.status;
-    const now = formatTimestamp();
-    setLeaves((prev) =>
-      prev.map((l) =>
-        l.id === leaveId
-          ? {
-              ...l,
-              status,
-              reviewedBy: currentUser.name,
-              reviewedAt: now,
-              reviewComment: comment || l.reviewComment,
-            }
-          : l
-      )
-    );
-    recordAudit(
-      status === 'Approved' ? 'Approved' : 'Rejected',
-      `Leave #${target.code.replace('LEV-', '')}`,
-      'Leave',
-      `Status: ${oldStatus}`,
-      `Status: ${status}`,
-      comment ? `Review comment: "${comment}"` : `Action by ${currentUser.name}`
-    );
-  };
-
-  const submitExpense = (expData: Omit<Expense, 'id' | 'code' | 'status' | 'submittedAt'>) => {
-    const nextCode = `EXP-${(expenses.length + 192).toString()}`;
-    const newExpense: Expense = {
-      ...expData,
-      id: `exp-${Date.now()}`,
-      code: nextCode,
-      status: 'Pending',
-      submittedAt: formatTimestamp(),
-    };
-    setExpenses((prev) => [newExpense, ...prev]);
-    recordAudit(
-      'Created',
-      `Expense #${newExpense.code.replace('EXP-', '')}`,
-      'Expense',
-      'N/A',
-      `${newExpense.amount} ${newExpense.currency} - ${newExpense.title}`,
-      `Claim submitted by ${currentUser.name}`
-    );
-  };
-
-  const reviewExpense = (expenseId: string, status: ExpenseStatus, notes?: string) => {
-    const target = expenses.find((e) => e.id === expenseId);
-    if (!target) return;
-    const oldStatus = target.status;
-    const now = formatTimestamp();
-    setExpenses((prev) =>
-      prev.map((e) =>
-        e.id === expenseId
-          ? {
-              ...e,
-              status,
-              reviewedBy: currentUser.name,
-              reviewedAt: now,
-              managerNotes: notes || e.managerNotes,
-            }
-          : e
-      )
+  const requestLeave: ErpContextType['requestLeave'] = (r) =>
+    act(
+      () =>
+        api.post('/leaves', {
+          leaveType: r.leaveType,
+          startDate: r.startDate,
+          endDate: r.endDate,
+          reason: r.reason,
+          exceptionalSubtype: r.exceptionalSubtype ?? null,
+        }),
+      ['leaves', 'balance'],
+      'Leave request submitted.'
     );
 
-    let actionLabel: AuditLogEntry['action'] = 'Status Changed';
-    if (status === 'Approved') actionLabel = 'Approved';
-    else if (status === 'Rejected') actionLabel = 'Rejected';
-    else if (status === 'Changes Requested') actionLabel = 'Requested Changes';
+  const reviewLeave: ErpContextType['reviewLeave'] = (id, decision, comment) =>
+    act(() => api.post(`/leaves/${id}/review`, { decision, comment: comment || null }), ['leaves', 'balance', 'employees'], `Leave ${decision.toLowerCase()}.`);
 
-    recordAudit(
-      actionLabel,
-      `Expense #${target.code.replace('EXP-', '')}`,
-      'Expense',
-      `Status: ${oldStatus}`,
-      `Status: ${status}`,
-      notes ? `Manager note: "${notes}"` : `Reviewed by ${currentUser.name}`
+  const submitExpense: ErpContextType['submitExpense'] = (e, receipt) =>
+    act(
+      async () => {
+        const created = await api.post<{ id: string }>('/expenses', {
+          title: e.title,
+          amount: e.amount,
+          currency: e.currency,
+          category: e.category,
+          date: e.date,
+        });
+        if (receipt) await api.upload(`/expenses/${created.id}/receipt`, receipt);
+      },
+      ['expenses'],
+      'Expense submitted.'
     );
-  };
 
-  const resetDemoData = () => {
-    localStorage.removeItem('workflow_employees');
-    localStorage.removeItem('workflow_projects');
-    localStorage.removeItem('workflow_tasks');
-    localStorage.removeItem('workflow_leaves');
-    localStorage.removeItem('workflow_expenses');
-    localStorage.removeItem('workflow_audit_logs');
-    localStorage.removeItem('workflow_current_user');
-    setEmployees(INITIAL_EMPLOYEES);
-    setProjects(INITIAL_PROJECTS);
-    setTasks(INITIAL_TASKS);
-    setLeaves(INITIAL_LEAVES);
-    setExpenses(INITIAL_EXPENSES);
-    setAuditLogs(INITIAL_AUDIT_LOGS);
-    setCurrentUserState(DEMO_USERS[0]);
+  const attachReceipt: ErpContextType['attachReceipt'] = (id, file) =>
+    act(() => api.upload(`/expenses/${id}/receipt`, file), ['expenses'], 'Receipt attached.');
+
+  const resubmitExpense: ErpContextType['resubmitExpense'] = (id) =>
+    act(() => api.put(`/expenses/${id}`, {}), ['expenses'], 'Expense resubmitted for review.');
+
+  const reviewExpense: ErpContextType['reviewExpense'] = (id, status, notes) => {
+    const decision = status as 'Approved' | 'Rejected' | 'Changes Requested';
+    return act(() => api.post(`/expenses/${id}/review`, { decision, notes: notes || null }), ['expenses'], `Expense ${decision.toLowerCase()}.`);
   };
 
   return (
     <ErpContext.Provider
       value={{
         currentUser,
-        setCurrentUser,
-        availableUsers: DEMO_USERS,
         employees,
         projects,
         tasks,
         leaves,
         expenses,
         auditLogs,
+        auditTotal,
+        leaveBalance,
         currency,
         setCurrency,
+        toasts,
+        dismissToast,
         addEmployee,
         updateEmployeeRole,
         addProject,
@@ -424,8 +340,9 @@ export const ErpProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         reviewLeave,
         submitExpense,
         reviewExpense,
-        resetDemoData,
-        recordAudit,
+        attachReceipt,
+        resubmitExpense,
+        reload,
       }}
     >
       {children}

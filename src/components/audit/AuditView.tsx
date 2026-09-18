@@ -21,7 +21,7 @@ import { useErp } from '../../context/ErpContext';
 import { AuditLogEntry } from '../../types';
 
 export const AuditView: React.FC = () => {
-  const { auditLogs, recordAudit, currentUser } = useErp();
+  const { auditLogs, auditTotal } = useErp();
 
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedEntityType, setSelectedEntityType] = useState<string>('All');
@@ -52,19 +52,6 @@ export const AuditView: React.FC = () => {
     downloadAnchor.remove();
   };
 
-  const handleSimulateEvent = () => {
-    const randCodes = ['EXP-192', 'LEV-089', 'TSK-203', 'PRJ-101', 'EMP-002'];
-    const selectedCode = randCodes[Math.floor(Math.random() * randCodes.length)];
-    recordAudit(
-      'Status Changed',
-      `Expense #${selectedCode.replace(/\D/g, '') || '192'}`,
-      'Expense',
-      'Status: Pending',
-      'Status: Approved',
-      `Executive audit validation executed by ${currentUser.name}`
-    );
-  };
-
   return (
     <div className="space-y-6">
       {/* Enterprise Title Header */}
@@ -84,13 +71,6 @@ export const AuditView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleSimulateEvent}
-            className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-xs font-semibold flex items-center gap-1.5 border border-indigo-200 transition-colors"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            Simulate Audit Entry
-          </button>
           <button
             onClick={exportLogsAsJson}
             className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors"
@@ -142,8 +122,10 @@ export const AuditView: React.FC = () => {
             Total Audit Events
           </span>
           <div className="mt-1 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-slate-900">{auditLogs.length}</span>
-            <span className="text-xs text-emerald-600 font-medium">100% Retained</span>
+            <span className="text-2xl font-bold text-slate-900">{auditTotal}</span>
+            <span className="text-xs text-emerald-600 font-medium">
+              {auditTotal > auditLogs.length ? `Showing latest ${auditLogs.length}` : 'All retained'}
+            </span>
           </div>
         </div>
 

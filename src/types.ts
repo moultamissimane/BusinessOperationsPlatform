@@ -124,4 +124,13 @@ export interface CurrentUser {
   isManager: boolean;
   avatar: string;
   ip: string;
+  permissions?: string[];
+}
+
+export interface LeaveBalance {
+  year: number;
+  entitlement: number;
+  used: number;
+  pending: number;
+  remaining: number;
 }

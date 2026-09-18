@@ -19,11 +19,12 @@ import {
   X,
 } from 'lucide-react';
 import { useErp } from '../../context/ErpContext';
-import { PERMISSIONS_LIST } from '../../mockData';
+import { PERMISSIONS_LIST } from '../../constants';
 import { DepartmentType, RoleType, Employee } from '../../types';
 
 export const EmployeesView: React.FC = () => {
   const { employees, addEmployee, updateEmployeeRole, currentUser } = useErp();
+  const canManage = currentUser.permissions?.includes('emp_write') ?? false;
 
   const [activeTab, setActiveTab] = useState<'directory' | 'departments' | 'permissions'>('directory');
   const [searchTerm, setSearchTerm] = useState('');
@@ -42,6 +43,7 @@ export const EmployeesView: React.FC = () => {
   const [newEmpRole, setNewEmpRole] = useState<RoleType>('Senior Engineer');
   const [newEmpTitle, setNewEmpTitle] = useState('');
   const [newEmpLocation, setNewEmpLocation] = useState('Casablanca HQ (Marina)');
+  const [newEmpPassword, setNewEmpPassword] = useState('');
 
   // Edit Role State
   const [editRole, setEditRole] = useState<RoleType>('Senior Engineer');
@@ -78,11 +80,11 @@ export const EmployeesView: React.FC = () => {
     return matchesSearch && matchesDept && matchesRole;
   });
 
-  const handleCreateEmployee = (e: React.FormEvent) => {
+  const handleCreateEmployee = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newEmpName || !newEmpEmail) return;
 
-    addEmployee({
+    const ok = await addEmployee({
       name: newEmpName,
       email: newEmpEmail,
       phone: newEmpPhone || '+212 660-000000',
@@ -93,20 +95,24 @@ export const EmployeesView: React.FC = () => {
       status: 'Active',
       joinDate: new Date().toISOString().split('T')[0],
       location: newEmpLocation,
-      permissions: ['emp_read', 'lev_request', 'exp_submit'],
+      permissions: [], // ignored: the server applies the role's default permissions
+      initialPassword: newEmpPassword,
     });
 
-    setIsAddModalOpen(false);
-    setNewEmpName('');
-    setNewEmpEmail('');
-    setNewEmpPhone('');
-    setNewEmpTitle('');
+    // Keep the form open on failure (duplicate email, weak password, ...) so nothing typed is lost.
+    if (ok) {
+      setIsAddModalOpen(false);
+      setNewEmpName('');
+      setNewEmpEmail('');
+      setNewEmpPhone('');
+      setNewEmpTitle('');
+      setNewEmpPassword('');
+    }
   };
 
-  const handleUpdateRole = () => {
+  const handleUpdateRole = async () => {
     if (!editingEmployee) return;
-    updateEmployeeRole(editingEmployee.id, editRole, editDept);
-    setEditingEmployee(null);
+    if (await updateEmployeeRole(editingEmployee.id, editRole, editDept)) setEditingEmployee(null);
   };
 
   return (
@@ -122,15 +128,17 @@ export const EmployeesView: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setIsAddModalOpen(true)}
-            className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            Add Employee
-          </button>
-        </div>
+        {canManage && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsAddModalOpen(true)}
+              className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              Add Employee
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Tabs */}
@@ -277,17 +285,19 @@ export const EmployeesView: React.FC = () => {
 
                 <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
                   <span className="text-[11px] text-slate-400">Joined {emp.joinDate}</span>
-                  <button
-                    onClick={() => {
-                      setEditingEmployee(emp);
-                      setEditRole(emp.role);
-                      setEditDept(emp.department);
-                    }}
-                    className="text-indigo-600 hover:text-indigo-700 font-medium flex items-center gap-1 hover:underline"
-                  >
-                    <Edit2 className="w-3 h-3" />
-                    Edit Role
-                  </button>
+                  {canManage && (
+                    <button
+                      onClick={() => {
+                        setEditingEmployee(emp);
+                        setEditRole(emp.role);
+                        setEditDept(emp.department);
+                      }}
+                      className="text-indigo-600 hover:text-indigo-700 font-medium flex items-center gap-1 hover:underline"
+                    >
+                      <Edit2 className="w-3 h-3" />
+                      Edit Role
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
@@ -531,6 +541,21 @@ export const EmployeesView: React.FC = () => {
                   <option value="Tangier Med Hub">Tangier Med Hub</option>
                   <option value="Remote (Morocco)">Remote (Morocco)</option>
                 </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">Initial Password *</label>
+                <input
+                  type="password"
+                  required
+                  minLength={8}
+                  autoComplete="new-password"
+                  value={newEmpPassword}
+                  onChange={(e) => setNewEmpPassword(e.target.value)}
+                  placeholder="At least 8 characters, with a letter and a digit"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-hidden"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">Share it securely; the employee can change it after signing in.</p>
               </div>
 
               <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">

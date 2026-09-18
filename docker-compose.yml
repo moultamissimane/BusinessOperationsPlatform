@@ -1,0 +1,59 @@
+# Local development stack: PostgreSQL + the .NET API.
+#   docker compose up --build
+# API: http://localhost:8080   Swagger UI: http://localhost:8080/swagger
+# Ports already taken? Override them: API_PORT=8090 DB_PORT=5440 MAILHOG_UI_PORT=8026 docker compose up --build
+# Frontend: `npm run dev` (port 3000) proxies /api to the API (API_PROXY_TARGET=http://localhost:8090 if you changed the port).
+#
+# Everything here is a development default. In any shared or production environment set real secrets
+# (JWT_KEY, POSTGRES_PASSWORD) and turn Seed__Enabled off.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: workflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-workflow_dev}
+      POSTGRES_DB: workflow
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workflow -d workflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Catches outgoing email (password-reset links). Inbox UI: http://localhost:8025
+  mailhog:
+    image: mailhog/mailhog
+    ports:
+      - "${MAILHOG_UI_PORT:-8025}:8025"
+
+  api:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8080}:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: Host=db;Port=5432;Database=workflow;Username=workflow;Password=${POSTGRES_PASSWORD:-workflow_dev}
+      Jwt__Key: ${JWT_KEY:-dev-only-key-replace-before-sharing-this-stack-0123456789}
+      Cors__AllowedOrigins__0: http://localhost:3000
+      Database__MigrateOnStartup: "true"
+      Seed__Enabled: "true"
+      Seed__DemoPassword: ${SEED_DEMO_PASSWORD:-Password123!}
+      Swagger__Enabled: "true"
+      RateLimiting__LoginPermitsPerMinute: ${LOGIN_RATE_LIMIT:-10}
+      Email__Smtp__Host: mailhog
+      Email__Smtp__Port: "1025"
+      Email__Smtp__UseSsl: "false"
+      Frontend__BaseUrl: http://localhost:3000
+    volumes:
+      - receipts:/app/data/receipts
+
+volumes:
+  pgdata:
+  receipts:

@@ -96,10 +96,10 @@ export const ProjectsView: React.FC = () => {
     },
   ];
 
-  const handleCreateProject = (e: React.FormEvent) => {
+  const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newProjName) return;
-    addProject({
+    const ok = await addProject({
       name: newProjName,
       description: newProjDesc || 'Enterprise initiative',
       department: newProjDept,
@@ -110,15 +110,17 @@ export const ProjectsView: React.FC = () => {
       status: 'Planning',
       teamIds: [newProjLeadId],
     });
-    setIsNewProjectModalOpen(false);
-    setNewProjName('');
-    setNewProjDesc('');
+    if (ok) {
+      setIsNewProjectModalOpen(false);
+      setNewProjName('');
+      setNewProjDesc('');
+    }
   };
 
-  const handleCreateTask = (e: React.FormEvent) => {
+  const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTaskTitle) return;
-    addTask({
+    const ok = await addTask({
       projectId: newTaskProjId,
       title: newTaskTitle,
       description: newTaskDesc,
@@ -127,9 +129,11 @@ export const ProjectsView: React.FC = () => {
       status: newTaskStatus,
       deadline: newTaskDeadline,
     });
-    setIsNewTaskModalOpen(false);
-    setNewTaskTitle('');
-    setNewTaskDesc('');
+    if (ok) {
+      setIsNewTaskModalOpen(false);
+      setNewTaskTitle('');
+      setNewTaskDesc('');
+    }
   };
 
   return (
@@ -146,20 +150,24 @@ export const ProjectsView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setIsNewTaskModalOpen(true)}
-            className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            New Task
-          </button>
-          <button
-            onClick={() => setIsNewProjectModalOpen(true)}
-            className="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors"
-          >
-            <Briefcase className="w-4 h-4" />
-            New Project
-          </button>
+          {currentUser.permissions?.includes('tsk_manage') && (
+            <button
+              onClick={() => setIsNewTaskModalOpen(true)}
+              className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              New Task
+            </button>
+          )}
+          {currentUser.permissions?.includes('prj_write') && (
+            <button
+              onClick={() => setIsNewProjectModalOpen(true)}
+              className="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors"
+            >
+              <Briefcase className="w-4 h-4" />
+              New Project
+            </button>
+          )}
         </div>
       </div>
 

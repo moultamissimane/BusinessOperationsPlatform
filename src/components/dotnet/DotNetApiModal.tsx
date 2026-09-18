@@ -1,313 +1,144 @@
 import React, { useState } from 'react';
-import { X, Code2, Server, Database, ShieldCheck, Copy, Check } from 'lucide-react';
+import { X, Server, Database, ShieldCheck, Cloud, ExternalLink } from 'lucide-react';
 
 interface DotNetApiModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-export const DotNetApiModal: React.FC<DotNetApiModalProps> = ({ isOpen, onClose }) => {
-  const [activeTab, setActiveTab] = useState<'controllers' | 'efcore' | 'dto' | 'architecture'>('controllers');
-  const [copied, setCopied] = useState(false);
+type Tab = 'endpoints' | 'security' | 'data' | 'deploy';
 
+// Kept in step with backend/README.md and the controllers under backend/src/WorkFlow.Api/Controllers.
+const ENDPOINTS: { area: string; route: string; needs: string }[] = [
+  { area: 'Auth', route: 'POST /api/auth/login · refresh · logout · change-password · forgot-password · reset-password, GET /me', needs: 'public / signed in' },
+  { area: 'Employees', route: 'GET, POST /api/employees · GET, PUT /api/employees/{id}', needs: 'emp_read / emp_write' },
+  { area: 'Lookups', route: 'GET /api/departments, /roles, /permissions · POST departments, roles', needs: 'signed in / sys_admin' },
+  { area: 'Projects', route: 'GET, POST /api/projects · GET, PUT /api/projects/{id}', needs: 'prj_read / prj_write' },
+  { area: 'Tasks', route: 'GET, POST /api/tasks · GET, PUT /api/tasks/{id} · PATCH /{id}/status', needs: 'prj_read / tsk_manage (assignee may move own task)' },
+  { area: 'Leave', route: 'GET, POST /api/leaves · GET /{id} · GET /balance · POST /{id}/review', needs: 'lev_request / lev_approve' },
+  { area: 'Expenses', route: 'GET, POST /api/expenses · PUT /{id} · POST /{id}/review · POST, GET /{id}/receipt', needs: 'exp_submit / exp_approve' },
+  { area: 'Dashboard', route: 'GET /api/dashboard', needs: 'signed in (managers: organisation; others: own data)' },
+  { area: 'Audit', route: 'GET /api/audit-logs (filters, paging) — read-only', needs: 'aud_view' },
+];
+
+const SECTIONS: Record<Exclude<Tab, 'endpoints'>, { title: string; items: string[] }> = {
+  security: {
+    title: 'Authentication & authorization',
+    items: [
+      'JWT access tokens (15 min) plus single-use rotating refresh tokens (7 days). Only a SHA-256 hash of each refresh token is stored; replaying a spent token revokes the whole session.',
+      'One authorization policy per permission (emp_read, exp_approve, sys_admin…). Permissions are re-read from the database on every refresh, so role changes take effect within minutes.',
+      'Separation of duties: nobody can review their own leave request or expense; each request can be reviewed exactly once (concurrent reviews are caught with PostgreSQL xmin row versions).',
+      'No self-promotion: without sys_admin you can only grant or revoke permissions you hold yourself.',
+      'Passwords hashed with BCrypt; login, refresh and password-reset endpoints are rate limited; unknown emails and wrong passwords are indistinguishable.',
+      'Receipts: PDF/PNG/JPEG up to 5 MB, content-sniffed, stored under a generated key and served only to the owner and approvers.',
+    ],
+  },
+  data: {
+    title: 'Data model & audit trail',
+    items: [
+      'PostgreSQL via EF Core 8 migrations: Employees, Departments, Roles, Permissions, Projects (with members), Tasks, LeaveRequests, Expenses, AuditLogs, RefreshTokens, PasswordResetTokens.',
+      'Human-readable codes (EMP-007, EXP-197…) come from PostgreSQL sequences, so concurrent inserts never collide.',
+      'Every create / update / status change writes an AuditLog row — user, role, action, entity, old → new value, UTC timestamp, client IP — in the same transaction as the change.',
+      'The audit table has no update or delete endpoint. Behind a proxy, set ForwardedHeaders__TrustAllProxies=true only if the API is reachable solely through it; otherwise clients could spoof the IP that gets recorded.',
+      'Annual leave: 18 working days a year (configurable), counted Mon–Fri; the balance is enforced on request. Sick and exceptional leave count calendar days.',
+    ],
+  },
+  deploy: {
+    title: 'Docker, CI/CD and Azure',
+    items: [
+      'docker compose up --build starts PostgreSQL, the API (migrated and seeded) and Mailhog for reset emails.',
+      'GitHub Actions: backend-ci.yml builds and runs the integration tests against a real PostgreSQL; deploy-azure.yml builds the image, applies infra/main.bicep and rolls out the API and this frontend.',
+      'Azure: Container Apps (API, managed identity), PostgreSQL Flexible Server, Blob Storage for receipts, Static Web Apps for the frontend, Log Analytics for logs.',
+      'Secrets (JWT key, database password) are supplied at deploy time — never committed. Seeding must be off in production.',
+    ],
+  },
+};
+
+export const DotNetApiModal: React.FC<DotNetApiModalProps> = ({ isOpen, onClose }) => {
+  const [activeTab, setActiveTab] = useState<Tab>('endpoints');
   if (!isOpen) return null;
 
-  const copyCode = (code: string) => {
-    navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const controllerCode = `// WorkFlow ERP — ASP.NET Core 9 Web API
-// Controllers/ExpensesController.cs
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using WorkFlow.Domain.Entities;
-using WorkFlow.Infrastructure.Data;
-
-namespace WorkFlow.Api.Controllers;
-
-[ApiController]
-[Route("api/v1/[controller]")]
-[Authorize]
-public class ExpensesController : ControllerBase
-{
-    private readonly ApplicationDbContext _context;
-    private readonly IAuditService _auditService;
-    private readonly ICurrentUserService _currentUser;
-
-    public ExpensesController(ApplicationDbContext context, IAuditService auditService, ICurrentUserService currentUser)
-    {
-        _context = context;
-        _auditService = auditService;
-        _currentUser = currentUser;
-    }
-
-    // GET: api/v1/expenses
-    [HttpGet]
-    public async Task<ActionResult<IEnumerable<ExpenseDto>>> GetExpenses([FromQuery] string? status, [FromQuery] string? category)
-    {
-        var query = _context.Expenses.Include(e => e.Employee).AsNoTracking();
-        if (!string.IsNullOrEmpty(status)) query = query.Where(e => e.Status == status);
-        return Ok(await query.OrderByDescending(e => e.SubmittedAt).ToListAsync());
-    }
-
-    // PATCH: api/v1/expenses/{id}/status
-    [HttpPatch("{id:guid}/status")]
-    [Authorize(Roles = "Director,DepartmentManager,Administrator")]
-    public async Task<IActionResult> UpdateExpenseStatus(Guid id, [FromBody] UpdateExpenseStatusRequest request)
-    {
-        var expense = await _context.Expenses.FindAsync(id);
-        if (expense == null) return NotFound();
-
-        var oldStatus = expense.Status;
-        expense.Status = request.NewStatus;
-        expense.ReviewedBy = _currentUser.FullName;
-        expense.ReviewedAt = DateTime.UtcNow;
-        expense.ManagerNotes = request.Notes;
-
-        // Enterprise Audit Trail Interceptor
-        await _auditService.LogAsync(new AuditLogEntry
-        {
-            UserId = _currentUser.UserId,
-            UserName = _currentUser.FullName,
-            Action = request.NewStatus == "Approved" ? AuditAction.Approved : AuditAction.StatusChanged,
-            Entity = $"Expense #{expense.Code}",
-            EntityType = EntityType.Expense,
-            OldValue = $"Status: {oldStatus}",
-            NewValue = $"Status: {request.NewStatus}",
-            IpAddress = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1",
-            Timestamp = DateTime.UtcNow,
-            Notes = request.Notes
-        });
-
-        await _context.SaveChangesAsync();
-        return Ok(expense);
-    }
-}`;
-
-  const efCoreCode = `// Infrastructure/Data/ApplicationDbContext.cs
-using Microsoft.EntityFrameworkCore;
-using WorkFlow.Domain.Entities;
-
-namespace WorkFlow.Infrastructure.Data;
-
-public class ApplicationDbContext : DbContext
-{
-    public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : base(options) { }
-
-    public DbSet<Employee> Employees => Set<Employee>();
-    public DbSet<Project> Projects => Set<Project>();
-    public DbSet<TaskItem> Tasks => Set<TaskItem>();
-    public DbSet<LeaveRequest> LeaveRequests => Set<LeaveRequest>();
-    public DbSet<Expense> Expenses => Set<Expense>();
-    public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
-
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
-    {
-        base.OnModelCreating(modelBuilder);
-
-        // PostgreSQL UUID and JSONB configuration
-        modelBuilder.Entity<Expense>(b =>
-        {
-            b.HasKey(e => e.Id);
-            b.Property(e => e.Code).HasMaxLength(32).IsRequired();
-            b.Property(e => e.Amount).HasPrecision(18, 2);
-            b.HasIndex(e => e.Code).IsUnique();
-            b.HasOne(e => e.Employee).WithMany().HasForeignKey(e => e.EmployeeId);
-        });
-
-        modelBuilder.Entity<AuditLog>(b =>
-        {
-            b.HasKey(a => a.Id);
-            b.Property(a => a.IpAddress).HasMaxLength(45);
-            b.HasIndex(a => a.Timestamp);
-        });
-    }
-}`;
-
-  const dtoCode = `// Application/Common/DTOs/ExpenseDtos.cs
-namespace WorkFlow.Application.Common.DTOs;
-
-public record ExpenseDto(
-    Guid Id,
-    string Code,
-    Guid EmployeeId,
-    string EmployeeName,
-    string Title,
-    decimal Amount,
-    string Currency,
-    string Category,
-    DateOnly Date,
-    string? ReceiptUrl,
-    string Status,
-    DateTime SubmittedAt,
-    string? ReviewedBy,
-    string? ManagerNotes
-);
-
-public record UpdateExpenseStatusRequest(
-    string NewStatus, // "Approved" | "Rejected" | "Changes Requested"
-    string? Notes
-);
-
-public record CreateLeaveRequestDto(
-    Guid EmployeeId,
-    string LeaveType, // Annual, Sick, Exceptional
-    DateOnly StartDate,
-    DateOnly EndDate,
-    int DaysCount,
-    string Reason,
-    string? ExceptionalSubtype
-);`;
-
-  const architectureInfo = `WorkFlow ERP — Enterprise Microsoft .NET Ecosystem Architecture:
-
-1. Backend Technology Stack:
-   • .NET 9.0 (ASP.NET Core Web API)
-   • Entity Framework Core 9 (PostgreSQL via Npgsql.EntityFrameworkCore.PostgreSQL)
-   • FluentValidation & MediatR (CQRS pattern)
-   • Serilog with Elasticsearch/Seq structured logging
-   • Microsoft.AspNetCore.Authentication.JwtBearer
-
-2. Production Infrastructure:
-   • Multi-stage Dockerfile (SDK build -> distroless/runtime-deps container)
-   • PostgreSQL 16 hosted on Azure Database for PostgreSQL (Flexible Server)
-   • Azure Container Apps with Managed Identity
-   • GitHub Actions CI/CD pipeline (dotnet test, SonarQube quality gate, Docker push)
-
-3. API Contracts:
-   • RESTful endpoints matching the React Frontend services
-   • Strict audit interceptor logging every state transition with client IP & user identity`;
+  const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
+    { id: 'endpoints', label: 'Endpoints', icon: <Server className="w-3.5 h-3.5" /> },
+    { id: 'security', label: 'Security', icon: <ShieldCheck className="w-3.5 h-3.5" /> },
+    { id: 'data', label: 'Data & Audit', icon: <Database className="w-3.5 h-3.5" /> },
+    { id: 'deploy', label: 'Deployment', icon: <Cloud className="w-3.5 h-3.5" /> },
+  ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
       <div className="relative w-full max-w-4xl max-h-[90vh] bg-white rounded-xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
-        {/* Modal Header */}
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
           <div className="flex items-center space-x-3">
-            <div className="w-9 h-9 rounded-lg bg-indigo-600 text-white flex items-center justify-center font-bold text-sm shadow-xs">
-              .NET
-            </div>
+            <div className="w-9 h-9 rounded-lg bg-indigo-600 text-white flex items-center justify-center font-bold text-sm shadow-xs">.NET</div>
             <div>
               <div className="flex items-center space-x-2">
-                <h3 className="text-base font-semibold text-slate-900">ASP.NET Core 9 Web API Specification</h3>
-                <span className="px-2 py-0.5 text-xs font-medium rounded-md bg-indigo-100 text-indigo-800 border border-indigo-200">
-                  .NET 9 + EF Core
-                </span>
-                <span className="px-2 py-0.5 text-xs font-medium rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200">
-                  PostgreSQL
-                </span>
+                <h3 className="text-base font-semibold text-slate-900">ASP.NET Core 8 Web API</h3>
+                <span className="px-2 py-0.5 text-xs font-medium rounded-md bg-indigo-100 text-indigo-800 border border-indigo-200">EF Core 8</span>
+                <span className="px-2 py-0.5 text-xs font-medium rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200">PostgreSQL</span>
               </div>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Full-stack C# backend contracts & database architecture integrated with this React frontend
-              </p>
+              <p className="text-xs text-slate-500 mt-0.5">The live backend behind this app. Full interactive reference: Swagger UI at /swagger.</p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 transition-colors"
-          >
+          <button onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 transition-colors">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Tab Navigation */}
         <div className="flex items-center px-6 border-b border-slate-200 bg-white gap-2 text-xs font-medium text-slate-600">
-          <button
-            onClick={() => setActiveTab('controllers')}
-            className={`py-3 px-3 border-b-2 flex items-center gap-1.5 transition-colors ${
-              activeTab === 'controllers'
-                ? 'border-indigo-600 text-indigo-600 font-semibold'
-                : 'border-transparent hover:text-slate-900'
-            }`}
-          >
-            <Server className="w-3.5 h-3.5" />
-            Controllers & Endpoints
-          </button>
-          <button
-            onClick={() => setActiveTab('efcore')}
-            className={`py-3 px-3 border-b-2 flex items-center gap-1.5 transition-colors ${
-              activeTab === 'efcore'
-                ? 'border-indigo-600 text-indigo-600 font-semibold'
-                : 'border-transparent hover:text-slate-900'
-            }`}
-          >
-            <Database className="w-3.5 h-3.5" />
-            EF Core & DbContext
-          </button>
-          <button
-            onClick={() => setActiveTab('dto')}
-            className={`py-3 px-3 border-b-2 flex items-center gap-1.5 transition-colors ${
-              activeTab === 'dto'
-                ? 'border-indigo-600 text-indigo-600 font-semibold'
-                : 'border-transparent hover:text-slate-900'
-            }`}
-          >
-            <Code2 className="w-3.5 h-3.5" />
-            C# DTOs & Records
-          </button>
-          <button
-            onClick={() => setActiveTab('architecture')}
-            className={`py-3 px-3 border-b-2 flex items-center gap-1.5 transition-colors ${
-              activeTab === 'architecture'
-                ? 'border-indigo-600 text-indigo-600 font-semibold'
-                : 'border-transparent hover:text-slate-900'
-            }`}
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            Enterprise Deployment (Azure / Docker)
-          </button>
-        </div>
-
-        {/* Modal Body */}
-        <div className="p-6 overflow-y-auto flex-1 bg-slate-900 text-slate-100 font-mono text-xs">
-          <div className="flex justify-between items-center mb-3">
-            <span className="text-slate-400">
-              {activeTab === 'controllers' && 'ExpensesController.cs — Status & Audit Dispatch'}
-              {activeTab === 'efcore' && 'ApplicationDbContext.cs — PostgreSQL Mapping'}
-              {activeTab === 'dto' && 'ExpenseDtos.cs — Strongly-Typed Contracts'}
-              {activeTab === 'architecture' && 'WorkFlow.Architecture.md'}
-            </span>
+          {tabs.map((t) => (
             <button
-              onClick={() => {
-                const text =
-                  activeTab === 'controllers'
-                    ? controllerCode
-                    : activeTab === 'efcore'
-                    ? efCoreCode
-                    : activeTab === 'dto'
-                    ? dtoCode
-                    : architectureInfo;
-                copyCode(text);
-              }}
-              className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+              key={t.id}
+              onClick={() => setActiveTab(t.id)}
+              className={`py-3 px-3 border-b-2 flex items-center gap-1.5 transition-colors ${
+                activeTab === t.id ? 'border-indigo-600 text-indigo-600 font-semibold' : 'border-transparent hover:text-slate-900'
+              }`}
             >
-              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-              {copied ? 'Copied' : 'Copy Code'}
+              {t.icon}
+              {t.label}
             </button>
-          </div>
-
-          <pre className="p-4 bg-slate-950 rounded-lg overflow-x-auto text-slate-200 border border-slate-800 leading-relaxed">
-            {activeTab === 'controllers' && controllerCode}
-            {activeTab === 'efcore' && efCoreCode}
-            {activeTab === 'dto' && dtoCode}
-            {activeTab === 'architecture' && architectureInfo}
-          </pre>
+          ))}
         </div>
 
-        {/* Modal Footer */}
+        <div className="p-6 overflow-y-auto flex-1 text-xs text-slate-700">
+          {activeTab === 'endpoints' ? (
+            <table className="w-full text-left">
+              <thead>
+                <tr className="text-slate-500 border-b border-slate-200">
+                  <th className="py-2 pr-3 font-semibold">Area</th>
+                  <th className="py-2 pr-3 font-semibold">Routes</th>
+                  <th className="py-2 font-semibold">Permission</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {ENDPOINTS.map((e) => (
+                  <tr key={e.area}>
+                    <td className="py-2.5 pr-3 font-semibold text-slate-900 whitespace-nowrap align-top">{e.area}</td>
+                    <td className="py-2.5 pr-3 font-mono text-[11px] align-top">{e.route}</td>
+                    <td className="py-2.5 align-top text-slate-600">{e.needs}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div>
+              <h4 className="text-sm font-bold text-slate-900 mb-3">{SECTIONS[activeTab].title}</h4>
+              <ul className="space-y-2.5 list-disc pl-5 leading-relaxed">
+                {SECTIONS[activeTab].items.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+
         <div className="px-6 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-xs text-slate-600">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            <span>REST API Endpoint status: Mock connected with live C# spec synchronization</span>
-          </div>
-          <button
-            onClick={onClose}
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg font-medium transition-colors"
-          >
-            Close Specification
+          <a href="/swagger" target="_blank" rel="noreferrer" className="flex items-center gap-1.5 text-indigo-600 hover:underline">
+            <ExternalLink className="w-3.5 h-3.5" />
+            Open Swagger UI
+          </a>
+          <button onClick={onClose} className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg font-medium transition-colors">
+            Close
           </button>
         </div>
       </div>

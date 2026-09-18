@@ -1,0 +1,102 @@
+name: Deploy to Azure
+
+# Manual on purpose: it needs an Azure subscription and the secrets listed in infra/README.md.
+on:
+  workflow_dispatch:
+    inputs:
+      resource-group:
+        description: Resource group to deploy into (created if missing)
+        default: rg-workflow
+      location:
+        description: Azure region
+        default: francecentral
+
+permissions:
+  id-token: write   # OIDC login to Azure: no long-lived credentials stored in GitHub
+  contents: read
+
+concurrency: deploy-azure
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      RG: ${{ inputs.resource-group }}
+      LOCATION: ${{ inputs.location }}
+      # Secrets go through the environment, never interpolated into shell text.
+      BOOTSTRAP_ADMIN_EMAIL: ${{ secrets.BOOTSTRAP_ADMIN_EMAIL }}
+      BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+      POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+      JWT_KEY: ${{ secrets.JWT_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create resource group
+        run: az group create -n "$RG" -l "$LOCATION" -o none
+
+      # Pass 1: infrastructure with a placeholder image, so the registry exists before we push to it.
+      - name: Deploy infrastructure
+        id: infra
+        run: |
+          az deployment group create -g "$RG" -f infra/main.bicep -n main -o none \
+            -p bootstrapAdminEmail="$BOOTSTRAP_ADMIN_EMAIL" bootstrapAdminPassword="$BOOTSTRAP_ADMIN_PASSWORD" \
+               postgresAdminPassword="$POSTGRES_ADMIN_PASSWORD" jwtKey="$JWT_KEY"
+          out() { az deployment group show -g "$RG" -n main --query "properties.outputs.$1.value" -o tsv; }
+          {
+            echo "acr=$(out acrName)"
+            echo "server=$(out acrLoginServer)"
+            echo "swa=$(out staticWebAppName)"
+            echo "api_url=$(out apiUrl)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push API image (in ACR, no local Docker needed)
+        run: az acr build -r "${{ steps.infra.outputs.acr }}" -t "workflow-api:${{ github.sha }}" backend
+
+      # Pass 2: same template, now pointing at the real image.
+      - name: Roll out API image
+        run: |
+          az deployment group create -g "$RG" -f infra/main.bicep -n main -o none \
+            -p apiImage="${{ steps.infra.outputs.server }}/workflow-api:${{ github.sha }}" apiPort=8080 \
+               bootstrapAdminEmail="$BOOTSTRAP_ADMIN_EMAIL" bootstrapAdminPassword="$BOOTSTRAP_ADMIN_PASSWORD" \
+               postgresAdminPassword="$POSTGRES_ADMIN_PASSWORD" jwtKey="$JWT_KEY"
+
+      - name: Wait for the API to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "${{ steps.infra.outputs.api_url }}/health" >/dev/null; then echo "healthy"; exit 0; fi
+            sleep 10
+          done
+          echo "API did not become healthy in 5 minutes" >&2; exit 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Build frontend against the deployed API
+        run: |
+          npm ci
+          npm run build
+        env:
+          VITE_API_BASE_URL: ${{ steps.infra.outputs.api_url }}
+
+      - name: Get Static Web Apps deployment token
+        id: swa
+        run: |
+          token=$(az staticwebapp secrets list -n "${{ steps.infra.outputs.swa }}" -g "$RG" --query properties.apiKey -o tsv)
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy frontend
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.swa.outputs.token }}
+          action: upload
+          app_location: dist   # already built above
+          skip_app_build: true

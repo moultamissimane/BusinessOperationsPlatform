@@ -78,7 +78,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeNav, onNavigate, onOpenD
           <div className="flex items-center gap-1.5">
             <span className="font-bold text-white text-sm tracking-tight">WorkFlow ERP</span>
             <span className="text-[10px] font-semibold bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-400/30">
-              .NET 9
+              .NET 8
             </span>
           </div>
           <p className="text-[11px] text-slate-400 font-normal">Business Operations Hub</p>
@@ -130,7 +130,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeNav, onNavigate, onOpenD
         >
           <div className="flex items-center gap-3">
             <Code2 className="w-4 h-4 text-indigo-400" />
-            <span className="text-left">ASP.NET Core 9 API</span>
+            <span className="text-left">ASP.NET Core 8 API</span>
           </div>
           <span className="text-[10px] font-semibold bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded">
             Swagger / EF

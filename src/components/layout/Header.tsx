@@ -1,16 +1,14 @@
 import React, { useState } from 'react';
 import {
-  Search,
   Bell,
-  CheckCircle2,
   ChevronDown,
-  RefreshCw,
   Code,
-  Shield,
-  Layers,
+  KeyRound,
+  LogOut,
 } from 'lucide-react';
 import { useErp } from '../../context/ErpContext';
-import { CurrentUser } from '../../types';
+import { useAuth } from '../../context/AuthContext';
+import { ChangePasswordModal } from '../auth/ChangePasswordModal';
 
 interface HeaderProps {
   onOpenDotNetModal: () => void;
@@ -19,28 +17,17 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ onOpenDotNetModal, activeNav, onNavigate }) => {
-  const {
-    currentUser,
-    setCurrentUser,
-    availableUsers,
-    expenses,
-    leaves,
-    resetDemoData,
-    currency,
-    setCurrency,
-  } = useErp();
+  const { currentUser, expenses, leaves, currency, setCurrency } = useErp();
+  const { logout } = useAuth();
 
   const [userDropdownOpen, setUserDropdownOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
 
+  // Managers work the approval queue; everyone else only sees their own pending items.
   const pendingLeaves = leaves.filter((l) => l.status === 'Pending');
   const pendingExpenses = expenses.filter((e) => e.status === 'Pending');
   const totalPending = pendingLeaves.length + pendingExpenses.length;
-
-  const handleSelectUser = (u: CurrentUser) => {
-    setCurrentUser(u);
-    setUserDropdownOpen(false);
-  };
 
   const getBreadcrumbTitle = (nav: string) => {
     switch (nav) {
@@ -81,7 +68,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenDotNetModal, activeNav, on
       <div className="hidden lg:flex items-center gap-2 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-full text-xs text-slate-600">
         <div className="flex items-center gap-1.5 font-medium">
           <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-          <span className="text-indigo-600 font-semibold">.NET 9</span>
+          <span className="text-indigo-600 font-semibold">.NET 8</span>
           <span className="text-slate-400">•</span>
           <span>PostgreSQL</span>
           <span className="text-slate-400">•</span>
@@ -216,47 +203,42 @@ export const Header: React.FC<HeaderProps> = ({ onOpenDotNetModal, activeNav, on
             <ChevronDown className="w-3.5 h-3.5 text-slate-400 ml-1" />
           </button>
 
-          {/* User Switcher Menu */}
+          {/* Account menu */}
           {userDropdownOpen && (
-            <div className="absolute right-0 mt-2 w-72 bg-white rounded-xl shadow-xl border border-slate-200 p-2 z-40 animate-in fade-in zoom-in-95 duration-150">
-              <div className="px-2 py-1.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-                Switch Persona to Test Workflows
+            <div className="absolute right-0 mt-2 w-64 bg-white rounded-xl shadow-xl border border-slate-200 p-2 z-40 animate-in fade-in zoom-in-95 duration-150">
+              <div className="px-2 py-2">
+                <p className="text-xs font-semibold text-slate-900 truncate">{currentUser.name}</p>
+                <p className="text-[11px] text-slate-500 truncate">{currentUser.email}</p>
+                <p className="text-[11px] text-slate-500 truncate">{currentUser.role} • {currentUser.department}</p>
               </div>
-              <div className="space-y-1 mt-1">
-                {availableUsers.map((u) => (
-                  <button
-                    key={u.id}
-                    onClick={() => handleSelectUser(u)}
-                    className={`w-full flex items-center gap-2.5 p-2 rounded-lg text-left transition-colors ${
-                      currentUser.id === u.id ? 'bg-indigo-50 text-indigo-900 font-medium' : 'hover:bg-slate-50'
-                    }`}
-                  >
-                    <img src={u.avatar} alt={u.name} className="w-8 h-8 rounded-full object-cover" />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold text-slate-900 truncate">{u.name}</span>
-                        {currentUser.id === u.id && <CheckCircle2 className="w-3.5 h-3.5 text-indigo-600" />}
-                      </div>
-                      <p className="text-[11px] text-slate-500 truncate">{u.role} • {u.department}</p>
-                    </div>
-                  </button>
-                ))}
-              </div>
-
-              <div className="pt-2 mt-2 border-t border-slate-100 flex items-center justify-between px-1">
-                <span className="text-[10px] text-slate-400">Client IP: {currentUser.ip}</span>
+              <div className="border-t border-slate-100 pt-1 space-y-0.5">
                 <button
-                  onClick={resetDemoData}
-                  className="text-[10px] text-slate-500 hover:text-slate-800 flex items-center gap-1 hover:underline"
+                  onClick={() => {
+                    setUserDropdownOpen(false);
+                    setChangePasswordOpen(true);
+                  }}
+                  className="w-full flex items-center gap-2 px-2 py-2 rounded-lg text-xs text-slate-700 hover:bg-slate-50"
                 >
-                  <RefreshCw className="w-2.5 h-2.5" />
-                  Reset Demo State
+                  <KeyRound className="w-3.5 h-3.5" />
+                  Change password
                 </button>
+                <button
+                  onClick={logout}
+                  className="w-full flex items-center gap-2 px-2 py-2 rounded-lg text-xs text-rose-700 hover:bg-rose-50"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  Sign out
+                </button>
+              </div>
+              <div className="pt-1.5 mt-1 border-t border-slate-100 px-2">
+                <span className="text-[10px] text-slate-400">Client IP: {currentUser.ip}</span>
               </div>
             </div>
           )}
         </div>
       </div>
+
+      {changePasswordOpen && <ChangePasswordModal onClose={() => setChangePasswordOpen(false)} />}
     </header>
   );
 };

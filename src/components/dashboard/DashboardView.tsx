@@ -83,7 +83,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 WorkFlow Operations Cockpit
               </span>
               <span className="text-xs text-slate-400">
-                Live ASP.NET Core 9 / EF Core Sync
+                Live ASP.NET Core 8 / EF Core data
               </span>
             </div>
             <h2 className="text-xl font-bold tracking-tight">

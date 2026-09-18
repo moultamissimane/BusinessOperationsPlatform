@@ -20,7 +20,7 @@ import { useErp } from '../../context/ErpContext';
 import { LeaveRequest, LeaveType } from '../../types';
 
 export const LeavesView: React.FC = () => {
-  const { leaves, employees, requestLeave, reviewLeave, currentUser } = useErp();
+  const { leaves, employees, requestLeave, reviewLeave, currentUser, leaveBalance } = useErp();
 
   const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'mine'>('all');
   const [searchTerm, setSearchTerm] = useState('');
@@ -30,8 +30,13 @@ export const LeavesView: React.FC = () => {
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
   const [reqType, setReqType] = useState<LeaveType>('Annual leave');
   const [exceptionalSubtype, setExceptionalSubtype] = useState<'Marriage' | 'Paternity/Maternity' | 'Bereavement' | 'Relocation' | 'Other'>('Marriage');
-  const [startDate, setStartDate] = useState('2026-10-01');
-  const [endDate, setEndDate] = useState('2026-10-05');
+  const inDays = (n: number) => {
+    const d = new Date();
+    d.setDate(d.getDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  const [startDate, setStartDate] = useState(() => inDays(14));
+  const [endDate, setEndDate] = useState(() => inDays(18));
   const [reason, setReason] = useState('');
 
   // Review Modal State
@@ -40,40 +45,52 @@ export const LeavesView: React.FC = () => {
   const [reviewComment, setReviewComment] = useState('');
 
   // Calculate days between two dates
-  const calculateDays = (start: string, end: string) => {
-    const s = new Date(start);
-    const e = new Date(end);
-    const diffTime = e.getTime() - s.getTime();
-    if (isNaN(diffTime) || diffTime < 0) return 1;
-    return Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1);
+  // Preview only; mirrors the server: annual leave counts Mon–Fri, sick and exceptional leave count calendar days.
+  const calculateDays = (start: string, end: string, type: LeaveType) => {
+    const s = new Date(`${start}T00:00:00`);
+    const e = new Date(`${end}T00:00:00`);
+    if (isNaN(s.getTime()) || isNaN(e.getTime()) || e < s) return 0;
+    let days = 0;
+    for (const d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) {
+      if (type !== 'Annual leave' || (d.getDay() !== 0 && d.getDay() !== 6)) days++;
+    }
+    return days;
   };
 
-  const handleCreateRequest = (e: React.FormEvent) => {
+  // The server computes the official day count (annual leave counts Mon–Fri only) and enforces the balance.
+  const handleCreateRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!reason) return;
 
-    const days = calculateDays(startDate, endDate);
-
-    requestLeave({
+    const ok = await requestLeave({
       employeeId: currentUser.id,
       leaveType: reqType,
       exceptionalSubtype: reqType === 'Exceptional leave' ? exceptionalSubtype : undefined,
       startDate,
       endDate,
-      daysCount: days,
       reason,
     });
 
-    setIsRequestModalOpen(false);
-    setReason('');
+    if (ok) {
+      setIsRequestModalOpen(false);
+      setReason('');
+    }
   };
 
-  const handleReviewSubmit = () => {
+  const handleReviewSubmit = async () => {
     if (!reviewingLeave) return;
-    reviewLeave(reviewingLeave.id, reviewAction, reviewComment);
-    setReviewingLeave(null);
-    setReviewComment('');
+    const ok = await reviewLeave(reviewingLeave.id, reviewAction, reviewComment);
+    if (ok) {
+      setReviewingLeave(null);
+      setReviewComment('');
+    }
   };
+
+  // Approved days of the signed-in user in the current year, for the summary cards.
+  const daysTaken = (type: LeaveType) =>
+    leaves
+      .filter((l) => l.employeeId === currentUser.id && l.leaveType === type && l.status === 'Approved' && l.startDate.startsWith(String(new Date().getFullYear())))
+      .reduce((sum, l) => sum + l.daysCount, 0);
 
   const filteredLeaves = leaves.filter((l) => {
     const emp = employees.find((e) => e.id === l.employeeId);
@@ -126,8 +143,11 @@ export const LeavesView: React.FC = () => {
               Annual Leave Balance
             </span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className="text-xl font-bold text-slate-900">19</span>
-              <span className="text-xs text-slate-500">/ 22 days accrued</span>
+              <span className="text-xl font-bold text-slate-900">{leaveBalance?.remaining ?? '–'}</span>
+              <span className="text-xs text-slate-500">
+                / {leaveBalance?.entitlement ?? '–'} days in {leaveBalance?.year ?? new Date().getFullYear()}
+                {leaveBalance && leaveBalance.pending > 0 ? ` (${leaveBalance.pending} pending)` : ''}
+              </span>
             </div>
           </div>
         </div>
@@ -138,11 +158,11 @@ export const LeavesView: React.FC = () => {
           </div>
           <div>
             <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
-              Certified Sick Leave
+              Sick Leave Taken
             </span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className="text-xl font-bold text-slate-900">8</span>
-              <span className="text-xs text-slate-500">/ 10 days quota</span>
+              <span className="text-xl font-bold text-slate-900">{daysTaken('Sick leave')}</span>
+              <span className="text-xs text-slate-500">approved days this year</span>
             </div>
           </div>
         </div>
@@ -153,11 +173,11 @@ export const LeavesView: React.FC = () => {
           </div>
           <div>
             <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
-              Exceptional Allowance
+              Exceptional Leave Taken
             </span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className="text-xl font-bold text-slate-900">4</span>
-              <span className="text-xs text-slate-500">days available</span>
+              <span className="text-xl font-bold text-slate-900">{daysTaken('Exceptional leave')}</span>
+              <span className="text-xs text-slate-500">approved days this year</span>
             </div>
           </div>
         </div>
@@ -316,7 +336,9 @@ export const LeavesView: React.FC = () => {
                     </td>
 
                     <td className="py-3 px-4 text-right">
-                      {req.status === 'Pending' ? (
+                      {req.status === 'Pending' && !(currentUser.isManager && req.employeeId !== currentUser.id) ? (
+                        <span className="text-[11px] text-slate-400 italic">Awaiting manager review</span>
+                      ) : req.status === 'Pending' ? (
                         <div className="flex items-center justify-end gap-1.5">
                           <button
                             onClick={() => {
@@ -437,9 +459,9 @@ export const LeavesView: React.FC = () => {
               </div>
 
               <div className="p-2 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-between text-slate-600">
-                <span>Calculated Working Duration:</span>
+                <span>Counted Duration:</span>
                 <span className="font-bold text-slate-900">
-                  {calculateDays(startDate, endDate)} working days
+                  {calculateDays(startDate, endDate, reqType)} {reqType === 'Annual leave' ? 'working days' : 'calendar days'}
                 </span>
               </div>
 

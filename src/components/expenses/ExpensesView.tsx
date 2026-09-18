@@ -19,9 +19,10 @@ import {
 } from 'lucide-react';
 import { useErp } from '../../context/ErpContext';
 import { Expense, ExpenseCategory, ExpenseStatus } from '../../types';
+import { ReceiptPreview } from './ReceiptPreview';
 
 export const ExpensesView: React.FC = () => {
-  const { expenses, employees, submitExpense, reviewExpense, currentUser, currency } = useErp();
+  const { expenses, employees, submitExpense, reviewExpense, attachReceipt, resubmitExpense, currentUser, currency } = useErp();
 
   const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'mine'>('all');
   const [searchTerm, setSearchTerm] = useState('');
@@ -38,8 +39,8 @@ export const ExpensesView: React.FC = () => {
   const [amount, setAmount] = useState<number | ''>('');
   const [expCurrency, setExpCurrency] = useState<'MAD' | 'USD' | 'EUR'>('MAD');
   const [category, setCategory] = useState<ExpenseCategory>('Software & Subscriptions');
-  const [date, setDate] = useState('2026-09-17');
-  const [receiptFileName, setReceiptFileName] = useState('invoice_receipt_scan.pdf');
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [receiptFile, setReceiptFile] = useState<File | null>(null);
 
   // Manager Review State
   const [reviewDecision, setReviewDecision] = useState<ExpenseStatus>('Approved');
@@ -73,31 +74,31 @@ export const ExpensesView: React.FC = () => {
     return matchesTab && matchesCategory && matchesStatus && matchesSearch;
   });
 
-  const handleSubmitExpense = (e: React.FormEvent) => {
+  const handleSubmitExpense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title || !amount) return;
 
-    submitExpense({
-      employeeId: currentUser.id,
-      title,
-      amount: Number(amount),
-      currency: expCurrency,
-      category,
-      date,
-      receiptFileName: receiptFileName || 'receipt_attached.pdf',
-      receiptUrl: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=600&auto=format&fit=crop&q=80',
-    });
+    const ok = await submitExpense(
+      { employeeId: currentUser.id, title, amount: Number(amount), currency: expCurrency, category, date },
+      receiptFile
+    );
 
-    setIsSubmitModalOpen(false);
-    setTitle('');
-    setAmount('');
+    // Keep the form open on failure so nothing typed is lost; the error is shown as a toast.
+    if (ok) {
+      setIsSubmitModalOpen(false);
+      setTitle('');
+      setAmount('');
+      setReceiptFile(null);
+    }
   };
 
-  const handleReviewSubmit = () => {
+  const handleReviewSubmit = async () => {
     if (!reviewingExpense) return;
-    reviewExpense(reviewingExpense.id, reviewDecision, managerNotes);
-    setReviewingExpense(null);
-    setManagerNotes('');
+    const ok = await reviewExpense(reviewingExpense.id, reviewDecision, managerNotes);
+    if (ok) {
+      setReviewingExpense(null);
+      setManagerNotes('');
+    }
   };
 
   return (
@@ -360,20 +361,45 @@ export const ExpensesView: React.FC = () => {
                     </td>
 
                     <td className="py-3 px-4 text-right">
-                      <button
-                        onClick={() => {
-                          setReviewingExpense(exp);
-                          setReviewDecision('Approved');
-                          setManagerNotes(
-                            exp.status === 'Approved'
-                              ? 'Approved. Reimbursement queued in accounts ledger.'
-                              : 'Approved per corporate expense policy.'
-                          );
-                        }}
-                        className="px-2.5 py-1 rounded-md border border-slate-200 hover:border-indigo-300 text-indigo-600 hover:bg-indigo-50 font-semibold text-xs transition-colors"
-                      >
-                        Review Claim
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        {/* Approvers act on pending claims, never their own (the API enforces this too). */}
+                        {currentUser.isManager && exp.status === 'Pending' && exp.employeeId !== currentUser.id && (
+                          <button
+                            onClick={() => {
+                              setReviewingExpense(exp);
+                              setReviewDecision('Approved');
+                              setManagerNotes('');
+                            }}
+                            className="px-2.5 py-1 rounded-md border border-slate-200 hover:border-indigo-300 text-indigo-600 hover:bg-indigo-50 font-semibold text-xs transition-colors"
+                          >
+                            Review Claim
+                          </button>
+                        )}
+                        {/* Owners can attach a receipt and, after "Changes Requested", resubmit. */}
+                        {exp.employeeId === currentUser.id && (exp.status === 'Pending' || exp.status === 'Changes Requested') && (
+                          <label className="px-2.5 py-1 rounded-md border border-slate-200 hover:bg-slate-50 text-slate-600 font-semibold text-xs cursor-pointer transition-colors">
+                            {exp.receiptFileName ? 'Replace receipt' : 'Attach receipt'}
+                            <input
+                              type="file"
+                              accept=".pdf,.png,.jpg,.jpeg"
+                              className="sr-only"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                e.target.value = '';
+                                if (file) attachReceipt(exp.id, file);
+                              }}
+                            />
+                          </label>
+                        )}
+                        {exp.employeeId === currentUser.id && exp.status === 'Changes Requested' && (
+                          <button
+                            onClick={() => resubmitExpense(exp.id)}
+                            className="px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs transition-colors"
+                          >
+                            Resubmit
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -462,25 +488,22 @@ export const ExpensesView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Receipt File Upload simulation */}
+              {/* Receipt upload: PDF / PNG / JPEG, 5 MB max. A receipt is required before a manager can approve. */}
               <div>
                 <label className="block text-slate-700 font-semibold mb-1">Tax Invoice / Receipt File</label>
-                <div className="border-2 border-dashed border-slate-200 rounded-lg p-4 text-center hover:bg-slate-50 transition-colors">
+                <label className="block border-2 border-dashed border-slate-200 rounded-lg p-4 text-center hover:bg-slate-50 transition-colors cursor-pointer">
                   <Upload className="w-6 h-6 text-slate-400 mx-auto mb-1" />
                   <span className="text-slate-600 block font-medium">
-                    Upload official tax invoice (Facture avec ICE)
+                    {receiptFile ? receiptFile.name : 'Upload official tax invoice (Facture avec ICE)'}
                   </span>
-                  <span className="text-slate-400 text-[10px] block mt-0.5">
-                    Attached mock: {receiptFileName}
-                  </span>
+                  <span className="text-slate-400 text-[10px] block mt-0.5">PDF, PNG or JPEG · up to 5 MB</span>
                   <input
-                    type="text"
-                    value={receiptFileName}
-                    onChange={(e) => setReceiptFileName(e.target.value)}
-                    placeholder="receipt_file_name.pdf"
-                    className="mt-2 text-center text-xs px-2 py-1 border border-slate-200 rounded text-slate-700 bg-white"
+                    type="file"
+                    accept=".pdf,.png,.jpg,.jpeg"
+                    className="sr-only"
+                    onChange={(e) => setReceiptFile(e.target.files?.[0] ?? null)}
                   />
-                </div>
+                </label>
               </div>
 
               <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
@@ -658,11 +681,7 @@ export const ExpensesView: React.FC = () => {
             </div>
             <div className="p-4 space-y-3 text-xs">
               <div className="aspect-4/3 rounded-lg overflow-hidden border border-slate-200 bg-slate-100 relative flex items-center justify-center">
-                <img
-                  src={viewingReceipt.receiptUrl}
-                  alt="Invoice receipt preview"
-                  className="w-full h-full object-cover"
-                />
+                <ReceiptPreview expense={viewingReceipt} />
                 <div className="absolute bottom-2 left-2 right-2 bg-slate-900/80 backdrop-blur-xs text-white p-2 rounded text-[11px]">
                   <div className="flex justify-between font-bold">
                     <span>{viewingReceipt.code}</span>
